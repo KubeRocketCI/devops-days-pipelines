@@ -1,0 +1,345 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  labels:
+    app.edp.epam.com/pipelinetype: review
+    app.edp.epam.com/triggertemplate: github-review-template
+  name: github-maven-quarkus-app-review
+spec:
+  description: The Review pipeline for building java21 application with Maven
+  finally:
+    - name: github-set-success-status
+      params:
+        - name: REPO_FULL_NAME
+          value: $(params.gitfullrepositoryname)
+        - name: DESCRIPTION
+          value: Pipeline (PASSED)
+        - name: STATE
+          value: success
+        - name: CONTEXT
+          value: Review Pipeline
+        - name: AUTH_TYPE
+          value: Token
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: ci-github
+        - name: GITHUB_TOKEN_SECRET_KEY
+          value: token
+        - name: SHA
+          value: $(params.gitsha)
+        - name: TARGET_URL
+          value: $(params.pipelineUrl)
+      taskRef:
+        kind: Task
+        name: github-set-status
+      when:
+        - input: $(tasks.status)
+          operator: in
+          values:
+            - Succeeded
+    - name: github-set-failure-status
+      params:
+        - name: REPO_FULL_NAME
+          value: $(params.gitfullrepositoryname)
+        - name: DESCRIPTION
+          value: Pipeline (FAILED)
+        - name: STATE
+          value: failure
+        - name: CONTEXT
+          value: Review Pipeline
+        - name: AUTH_TYPE
+          value: Token
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: ci-github
+        - name: GITHUB_TOKEN_SECRET_KEY
+          value: token
+        - name: SHA
+          value: $(params.gitsha)
+        - name: TARGET_URL
+          value: $(params.pipelineUrl)
+      taskRef:
+        kind: Task
+        name: github-set-status
+      when:
+        - input: $(tasks.status)
+          operator: in
+          values:
+            - Failed
+  params:
+    - default: >-
+        https://portal-{{ $.Release.Namespace }}.{{ $.Values.dnsWildCard }}/c/main/pipelines/pipelineruns/$(context.pipelineRun.namespace)/$(context.pipelineRun.name)
+      name: pipelineUrl
+      type: string
+    - default: https://github.com/sergk/spring-petclinic
+      description: git url to clone
+      name: git-source-url
+      type: string
+    - default: edp
+      description: git revision to checkout (branch, tag, sha, ref…)
+      name: git-source-revision
+      type: string
+    - default: ''
+      description: Refspec to fetch before checking out revision.
+      name: git-refspec
+      type: string
+    - description: Target branch of Merge Request
+      name: targetBranch
+      type: string
+    - description: Change number from Merge Request
+      name: changeNumber
+      type: string
+    - default: java21-maven
+      description: Project name
+      name: CODEBASE_NAME
+      type: string
+    - description: Codebasebranch name
+      name: CODEBASEBRANCH_NAME
+      type: string
+    - default: docker.io/maven:3.9.9-eclipse-temurin-21
+      description: maven image version
+      name: image
+      type: string
+    - default: docker.io/maven:3.9.9-eclipse-temurin-21
+      description: sonar image version
+      name: sonar_image
+      type: string
+    - description: repository full name
+      name: gitfullrepositoryname
+      type: string
+    - description: commit sha
+      name: gitsha
+      type: string
+    - default: deploy-templates
+      description: Deploy templates directory for helm-lint
+      name: CHART_DIR
+      type: string
+    - default: .
+      description: ct-configs directory for helm-lint
+      name: CT_CONFIGS_DIR
+      type: string
+  tasks:
+    - name: github-set-pending-status
+      params:
+        - name: REPO_FULL_NAME
+          value: $(params.gitfullrepositoryname)
+        - name: DESCRIPTION
+          value: Pipeline (IN PROGRESS)
+        - name: STATE
+          value: pending
+        - name: CONTEXT
+          value: Review Pipeline
+        - name: AUTH_TYPE
+          value: Token
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: ci-github
+        - name: GITHUB_TOKEN_SECRET_KEY
+          value: token
+        - name: SHA
+          value: $(params.gitsha)
+        - name: TARGET_URL
+          value: $(params.pipelineUrl)
+      taskRef:
+        kind: Task
+        name: github-set-status
+    - name: fetch-repository
+      params:
+        - name: url
+          value: $(params.git-source-url)
+        - name: revision
+          value: $(params.git-source-revision)
+        - name: refspec
+          value: $(params.git-refspec)
+        - name: subdirectory
+          value: source
+      runAfter:
+        - github-set-pending-status
+      taskRef:
+        kind: Task
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+        - name: ssh-directory
+          workspace: ssh-creds
+    - name: init-values
+      params:
+        - name: CODEBASE_NAME
+          value: $(params.CODEBASE_NAME)
+        - name: BRANCH_NAME
+          value: $(params.git-source-revision)
+      runAfter:
+        - fetch-repository
+      taskRef:
+        kind: Task
+        name: init-values
+    - name: helm-docs
+      params:
+        - name: CHART_DIR
+          value: deploy-templates
+      runAfter:
+        - fetch-repository
+      taskRef:
+        kind: Task
+        name: helm-docs
+      workspaces:
+        - name: source
+          subPath: source
+          workspace: shared-workspace
+    - name: get-cache
+      params:
+        - name: CACHE_NAME
+          value: $(params.CODEBASE_NAME)
+      runAfter:
+        - fetch-repository
+      taskRef:
+        kind: Task
+        name: get-cache
+      workspaces:
+        - name: cache
+          subPath: cache
+          workspace: shared-workspace
+    - name: get-maven-module
+      runAfter:
+        - init-values
+      taskRef:
+        kind: Task
+        name: get-maven-module
+      workspaces:
+        - name: source
+          subPath: source
+          workspace: shared-workspace
+    - name: compile
+      params:
+        - name: MAVEN_IMAGE
+          value: $(params.image)
+        - name: GOALS
+          value:
+            - '-B'
+            - compile
+      runAfter:
+        - get-cache
+      taskRef:
+        kind: Task
+        name: maven
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: test
+      params:
+        - name: MAVEN_IMAGE
+          value: $(params.image)
+        - name: GOALS
+          value:
+            - '-B'
+            - org.jacoco:jacoco-maven-plugin:prepare-agent
+            - '-Dmaven.test.failure.ignore=true'
+            - verify
+            - org.jacoco:jacoco-maven-plugin:report
+      runAfter:
+        - compile
+      taskRef:
+        kind: Task
+        name: maven
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: sonar
+      params:
+        - name: SONAR_PROJECT_KEY
+          value: $(params.CODEBASE_NAME)
+        - name: SONAR_PROJECT_NAME
+          value: $(params.CODEBASE_NAME)
+        - name: MAVEN_IMAGE
+          value: $(params.sonar_image)
+        - name: EXTRA_COMMANDS
+          value:
+            - '-B'
+            - '-Dsonar.projectKey=$(params.CODEBASE_NAME)'
+            - '-Dsonar.projectName=$(params.CODEBASE_NAME)'
+            - '-Dsonar.pullrequest.key=$(params.changeNumber)'
+            - '-Dsonar.pullrequest.branch=$(params.git-source-revision)'
+            - '-Dsonar.pullrequest.base=$(params.targetBranch)'
+            - '-Dsonar.qualitygate.wait=true'
+            - verify
+            - sonar:sonar
+      runAfter:
+        - test
+      taskRef:
+        kind: Task
+        name: sonarqube-maven
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: build
+      params:
+        - name: MAVEN_IMAGE
+          value: $(params.image)
+        - name: GOALS
+          value:
+            - '-B'
+            - clean
+            - package
+            - '-DskipTests=true'
+      runAfter:
+        - sonar
+      taskRef:
+        kind: Task
+        name: maven
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: save-cache
+      params:
+        - name: CACHE_NAME
+          value: $(params.CODEBASE_NAME)
+      runAfter:
+        - build
+      taskRef:
+        kind: Task
+        name: save-cache
+      workspaces:
+        - name: cache
+          subPath: cache
+          workspace: shared-workspace
+    - name: dockerfile-lint
+      runAfter:
+        - fetch-repository
+      taskRef:
+        kind: Task
+        name: hadolint
+      workspaces:
+        - name: source
+          subPath: source
+          workspace: shared-workspace
+    - name: dockerbuild-verify
+      params:
+        - name: context
+          value: $(tasks.get-maven-module.results.DEPLOYABLE_MODULE_DIR)
+      runAfter:
+        - get-maven-module
+        - build
+        - dockerfile-lint
+      taskRef:
+        kind: Task
+        name: dockerbuild-verify
+      workspaces:
+        - name: source
+          subPath: source
+          workspace: shared-workspace
+    - name: helm-lint
+      params:
+        - name: CHART_DIR
+          value: $(params.CHART_DIR)
+        - name: CT_CONFIGS_DIR
+          value: $(params.CT_CONFIGS_DIR)
+      runAfter:
+        - fetch-repository
+      taskRef:
+        kind: Task
+        name: helm-lint
+      workspaces:
+        - name: source
+          subPath: source
+          workspace: shared-workspace
+  workspaces:
+    - name: shared-workspace
+    - name: ssh-creds
